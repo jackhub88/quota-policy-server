@@ -3,36 +3,49 @@
  * Simple maildir quota policy server for postfix
  *
  * configure a policy-socket in file /etc/postfix/master.cf
-    127.0.0.1:12340  inet  n       n       n       -       0       spawn
-        user=mailuser argv=/usr/bin/php -f /etc/postfix/quota-status.php
-
+ *   127.0.0.1:12340  inet  n       n       n       -       0       spawn
+ *       user=mailuser argv=/usr/bin/php -f /etc/postfix/quota-status.php
+ *
  * enable the check_policy_service in file /etc/postfix/main.cf
-    smtpd_recipient_restrictions =
-        check_policy_service inet:127.0.0.1:12340
-    ...
+ *   smtpd_recipient_restrictions =
+ *       check_policy_service inet:127.0.0.1:12340
+ *   ...
  */
 
-// Debugger - please set to FALSE after testing!
+/**
+ * Debugger - please set to FALSE after testing!
+ */
 define('DEBUGGER',true);
 define('DEBUGGER_LOGFILE','/tmp/quota-status.log');
 
-// maildirsize-filepath: MAILBOX_BASE_PATH/request[MAILBOX_USER]/Maildir/maildirsize
-// Username-Key can be recipient => abc@exmaple.com OR sasl_username
+/**
+ * Username-Key: recipient|sasl_username
+ */
 define('USERNAME_KEY','recipient');
+/**
+ * comma separated homedirectory lookup-functions
+ */
+define('HOME_LOOKUP_FUNCTIONS','home_static_lookup');
+/**
+ * Only for home_static_lookup
+ */
 define('MAILBOX_BASE_PATH','/var/spool/Mailbox/');
+define('QUOTA_GRACE', 0);
 define('ACTION_SUCCESS',"dunno");
 define('ACTION_REJECT',"defer_if_permit 552 5.2.2 Mailbox is full");
-define('QUOTA_GRACE', 0);
 
-$request = read_access_policy_request();
-echo response_quota_status($request);
+$request = read_smptd_policy_request();
+echo get_response($request);
 
 /**
- * http://www.postfix.org/SMTPD_POLICY_README.html
+ * Reads postfix SMTPD_POLICY-request
+ * End of request is a empty line
+ *
+ * More info: http://www.postfix.org/SMTPD_POLICY_README.html
  *
  * @return array get an name/value-array with all request attributes
  */
-function read_access_policy_request() {
+function read_smptd_policy_request() {
     $request_data = array();
 
     if ($fp = fopen("php://stdin", "r")) {
@@ -47,14 +60,15 @@ function read_access_policy_request() {
 }
 
 /**
+ * Checks the mailbox quota and gets the response-action for postfix
+ *
  * @param $request
  *
  * @return string Response action (dunno for pass to other checks or defer_if_permit to reject)
  */
-function response_quota_status($request) {
-    $user = $request[USERNAME_KEY];
-    logger('user',$user);
-    $maildirsize_file = MAILBOX_BASE_PATH.$user."/Maildir/maildirsize";
+function get_response($request) {
+    $home = get_home($request);
+    $maildirsize_file = $home."/Maildir/maildirsize";
     $action = ( is_overquota($maildirsize_file, $request['size']) === true ) ? ACTION_REJECT."\n\n" : ACTION_SUCCESS."\n\n";
     $action = 'action='.$action;
     logger('RESPONSE', $action);
@@ -111,6 +125,36 @@ function is_overquota($maildirsize_file, $mailsize) {
     if(isset($max_count) && $current_count+1 > $max_count) return true;
     return false;
 }
+
+function get_home($request) {
+    $home = false;
+    $lookup_functions = explode(',', HOME_LOOKUP_FUNCTIONS);
+    foreach ($lookup_functions as $lookup_function) {
+        if(function_exists($lookup_function)) {
+            $home = $lookup_function($request);
+            if($home !== false) break;
+        }
+    }
+    return $home;
+}
+
+/**
+ * Gets the user homedirectory-path or false
+ *
+ * @param $request
+ *
+ * @return false|string gets the user-home directory or false
+ */
+function home_static_lookup($request) {
+    $user = trim(strtolower($request[USERNAME_KEY]));
+    logger('user',$user);
+    if(!$user) return false;
+
+    $home = MAILBOX_BASE_PATH.$user;
+    logger('user home directory', MAILBOX_BASE_PATH.$user);
+    return $home;
+}
+
 
 function logger($description, $message) {
     if(DEBUGGER !== true) return;
